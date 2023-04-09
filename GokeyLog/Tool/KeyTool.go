@@ -12,9 +12,12 @@ import (
 // GetAppPath 函数返回当前应用程序的路径
 // GetAppPath function returns the path of the current application
 func GetAppPath() (string, error) {
-	exePath, err := os.Getwd() // 获取当前工作目录 Get the current working directory
+	exePath, err := os.Executable()
 	if err != nil {
-		return "", err // 如果获取失败，返回错误 Return error if failed to get
+		exePath, err = os.Getwd() // 获取当前工作目录 Get the current working directory
+		if err != nil {
+			return "", err // 如果获取失败，返回错误 Return error if failed to get
+		}
 	}
 	return filepath.Dir(exePath), nil // 返回当前应用程序的路径 Return the path of the current application
 }

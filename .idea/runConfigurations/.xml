@@ -1,8 +1,0 @@
-<component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="全部构建" type="CompoundRunConfigurationType">
-    <toRun name="GokeyLog" type="GoApplicationRunConfiguration" />
-    <toRun name="GokeyLua" type="GoApplicationRunConfiguration" />
-    <toRun name="GokeyRun" type="GoApplicationRunConfiguration" />
-    <method v="2" />
-  </configuration>
-</component>

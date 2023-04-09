@@ -1,12 +1,15 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="GokeyLua" type="GoApplicationRunConfiguration" factoryName="Go Application">
     <module name="GoRobotScript" />
-    <working_directory value="$PROJECT_DIR$/" />
+    <working_directory value="$PROJECT_DIR$/bin" />
     <parameters value="main" />
     <kind value="FILE" />
     <directory value="$PROJECT_DIR$" />
     <filePath value="$PROJECT_DIR$/GokeyLua/main.go" />
     <output_directory value="$PROJECT_DIR$/bin" />
-    <method v="2" />
+    <method v="2">
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="GokeyLog" run_configuration_type="GoApplicationRunConfiguration" />
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="GokeyRun" run_configuration_type="GoApplicationRunConfiguration" />
+    </method>
   </configuration>
 </component>
