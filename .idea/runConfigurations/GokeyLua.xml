@@ -2,6 +2,7 @@
   <configuration default="false" name="GokeyLua" type="GoApplicationRunConfiguration" factoryName="Go Application">
     <module name="GoRobotScript" />
     <working_directory value="$PROJECT_DIR$/" />
+    <parameters value="main" />
     <kind value="FILE" />
     <directory value="$PROJECT_DIR$" />
     <filePath value="$PROJECT_DIR$/GokeyLua/main.go" />
