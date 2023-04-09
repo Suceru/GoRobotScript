@@ -5,6 +5,7 @@
     <kind value="FILE" />
     <directory value="$PROJECT_DIR$" />
     <filePath value="$PROJECT_DIR$/Gokeylog/main.go" />
+    <output_directory value="$PROJECT_DIR$/bin" />
     <option name="run" value="false" />
     <method v="2" />
   </configuration>

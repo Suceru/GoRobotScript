@@ -38,7 +38,7 @@ func main() {
 	// 	}
 	// 	FKeyboard(*s)
 	case Simkeyrun:
-		if err := L.DoFile("GokeyLua/main.lua"); err != nil {
+		if err := L.DoFile("main.lua"); err != nil {
 			panic(err)
 		}
 	default:

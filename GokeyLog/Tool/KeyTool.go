@@ -42,6 +42,7 @@ func KeyLog() {
 	defer hook.End()
 	scriptpath, _ := GetScriptDir()
 	scriptpath = filepath.Join(scriptpath, time.Now().Format("2006-01-02-150405")+".script")
+	fmt.Println("Path: " + scriptpath)
 	file, err := os.OpenFile(scriptpath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Println(err)
