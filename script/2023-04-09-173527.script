@@ -1,0 +1,9 @@
+{"id":5,"When":"2023-04-09T17:35:27.7599312+08:00","mask":0,"reserved":0,"keycode":26,"rawcode":219,"keychar":65535,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":3,"When":"2023-04-09T17:35:30.6410925+08:00","mask":0,"reserved":0,"keycode":0,"rawcode":83,"keychar":115,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":5,"When":"2023-04-09T17:35:30.7680935+08:00","mask":0,"reserved":0,"keycode":31,"rawcode":83,"keychar":65535,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":3,"When":"2023-04-09T17:35:31.0218776+08:00","mask":0,"reserved":0,"keycode":0,"rawcode":68,"keychar":100,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":5,"When":"2023-04-09T17:35:31.2097981+08:00","mask":0,"reserved":0,"keycode":32,"rawcode":68,"keychar":65535,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":3,"When":"2023-04-09T17:35:31.4010315+08:00","mask":0,"reserved":0,"keycode":0,"rawcode":65,"keychar":97,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":5,"When":"2023-04-09T17:35:31.5922974+08:00","mask":0,"reserved":0,"keycode":30,"rawcode":65,"keychar":65535,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":3,"When":"2023-04-09T17:35:32.5472291+08:00","mask":0,"reserved":0,"keycode":0,"rawcode":13,"keychar":13,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}
+{"id":5,"When":"2023-04-09T17:35:32.6708639+08:00","mask":0,"reserved":0,"keycode":28,"rawcode":13,"keychar":65535,"button":0,"clicks":0,"x":0,"y":0,"amount":0,"rotation":0,"direction":0}

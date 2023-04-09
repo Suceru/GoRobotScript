@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Gokeylog/Tool"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -33,12 +34,7 @@ func low() {
 
 	evChan := hook.Start()
 	defer hook.End()
-	scriptpath, _ := os.Getwd()
-	scriptpath = filepath.Join(scriptpath, "script")
-	_, err := os.Stat(scriptpath)
-	if os.IsNotExist(err) {
-		os.MkdirAll(scriptpath, os.ModePerm)
-	}
+	scriptpath, _ := KeyTool.GetScriptDir()
 	scriptpath = filepath.Join(scriptpath, time.Now().Format("2006-01-02-150405")+".script")
 	file, err := os.OpenFile(scriptpath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
