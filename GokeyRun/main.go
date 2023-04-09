@@ -1,6 +1,7 @@
 package main
 
 import (
+	KeyTool "GoRobotScript/GokeyRun/Tool"
 	"bufio"
 	"encoding/json"
 	"flag"
@@ -86,8 +87,8 @@ func Readscriptrun(pathstr string) {
 			fmt.Println("quit")
 			os.Exit(0)
 		}
-		fmt.Println(strconv.Itoa(index) + ":" + Scriptexe(&value))
-		fmt.Println(strconv.Itoa(index) + Scripttime.Local().String())
+		fmt.Println(strconv.Itoa(index) + ":" + KeyTool.Scriptexe(&value))
+		fmt.Println(strconv.Itoa(index) + KeyTool.Scripttime.Local().String())
 		//fmt.Println(strconv.Itoa(index) + "+++ " + value.String())
 	}
 

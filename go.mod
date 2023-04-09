@@ -1,10 +1,11 @@
-module GokeyRun
+module GoRobotScript
 
 go 1.19
 
 require (
 	github.com/go-vgo/robotgo v0.100.10
 	github.com/robotn/gohook v0.40.0
+	github.com/yuin/gopher-lua v1.1.0
 )
 
 require (
