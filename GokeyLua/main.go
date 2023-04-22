@@ -1,7 +1,8 @@
 package main
 
 import (
-	CallGo "GoRobotScript/GokeyLua/Tool"
+	CallGo "GoRobotScript/GokeyLua/Tool/CallGo"
+	SuKey "GoRobotScript/GokeyLua/Tool/SuKey"
 	"flag"
 	"fmt"
 	lua "github.com/yuin/gopher-lua"
@@ -14,9 +15,11 @@ func ReadscriptUsage() {
 
 }
 func main() {
+
 	L := lua.NewState()
 	defer L.Close()
 	L.PreloadModule("CallGo", CallGo.Loader)
+	L.PreloadModule("SuKey", SuKey.Loader)
 	scriptpath := flag.String("script", "path", "Script Path")
 	//scriptpatht := *scriptpath
 	Simkeyrun := "main"

@@ -1,8 +1,10 @@
 print("Hello World!")
 local m = require("CallGo")
+local key = require("SuKey")
+key.TypeStr("0000000")
 m.myfunc()
 print(m.name)
-m.keyLog()
+print(m.showalert("AreU","Quit"))
 function max(num1, num2)
 
    if (num1 > num2) then
