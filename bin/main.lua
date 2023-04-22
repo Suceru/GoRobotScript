@@ -1,6 +1,7 @@
 print("Hello World!")
 local m = require("CallGo")
 local key = require("SuKey")
+key.KeyTap({"esc", "ctrl", "shift"})
 key.TypeStr("0000000")
 m.myfunc()
 print(m.name)
