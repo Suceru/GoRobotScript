@@ -38,7 +38,7 @@ func showalert(L *lua.LState) int {
 	// 将第二个参数转换为string类型
 	msg := L.ToString(2)
 	// 调用robotgo.ShowAlert函数，弹出一个提示框，返回值为bool类型
-	abool := robotgo.ShowAlert(title, msg)
+	abool := robotgo.Alert(title, msg)
 	// 将返回值转换为lua.LBool类型，并压入栈中
 	L.Push(lua.LBool(abool))
 	// 将弹出的Alert窗口置顶

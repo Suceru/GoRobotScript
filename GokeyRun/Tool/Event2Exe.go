@@ -41,14 +41,14 @@ func Scriptexe(e *hook.Event) string {
 			return fmt.Sprintf("Event: {Kind: KeyDown, Rawcode: %v, Keychar: %v}", e.Rawcode, e.Keychar)
 		case hook.MouseUp:
 			robotgo.MilliSleep(int(Delay.Milliseconds()))
-			robotgo.MouseToggle("up", string(e.Button))
+			robotgo.MouseUp(string(e.Button)) //.MouseToggle("up", string(e.Button))
 			return fmt.Sprintf("Event: {Kind: MouseUp, Button: %v, X: %v, Y: %v, Clicks: %v}", e.Button, e.X, e.Y, e.Clicks)
 		case hook.MouseHold:
 			robotgo.MilliSleep(int(Delay.Milliseconds()))
 			return fmt.Sprintf("Event: {Kind: MouseHold, Button: %v, X: %v, Y: %v, Clicks: %v}", e.Button, e.X, e.Y, e.Clicks)
 		case hook.MouseDown:
 			robotgo.MilliSleep(int(Delay.Milliseconds()))
-			robotgo.MouseToggle("down", string(e.Button))
+			robotgo.MouseDown(string(e.Button)) //MouseToggle("down", string(e.Button))
 			return fmt.Sprintf("Event: {Kind: MouseDown, Button: %v, X: %v, Y: %v, Clicks: %v}", e.Button, e.X, e.Y, e.Clicks)
 		case hook.MouseMove:
 
