@@ -1,0 +1,17 @@
+# 编译输出目录（二进制程序与中间生成物不纳入版本控制）
+bin
+
+# IDE 与编辑器临时文件
+.idea/
+.vscode/
+*.swp
+*~
+
+# 操作系统自动生成的文件
+Thumbs.db
+[Dd]esktop.ini
+
+# 临时测试日志与临时压缩包
+*.log
+temp_*
+*.tmp
