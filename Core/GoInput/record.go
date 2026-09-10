@@ -19,7 +19,7 @@ import (
 // RecordAction 表示统一的键鼠与手柄动作帧
 type RecordAction struct {
 	Dt int64  `json:"dt"`           // 距离上一帧毫秒差 (整数 ms，极速解码)
-	Op string `json:"op"`           // "init"(起点锚定), "mv"(绝对坐标移动), "rmv"(3D/VR相对位移), "kd"/"ku"(键按下/弹起), "md"/"mu"(鼠标按下/弹起), "mw"(滚轮), "gp"(手柄动作)
+	Op string `json:"op"`           // "init"(起点锚定), "mv"(绝对坐标移动), "rmv"(3D/VR相对位移), "kd"/"ku"(键按下/弹起), "md"/"mu"(鼠标按下/弹起), "mw"(滚轮), "gp"(手柄动作), "vision"/"vslot"(识图状态标记行)
 
 	// 键盘与鼠标按键
 	Key string `json:"key,omitempty"` // 键名
@@ -42,6 +42,17 @@ type RecordAction struct {
 	GpLY   int16  `json:"gp_ly,omitempty"` // 左摇杆 Y
 	GpRX   int16  `json:"gp_rx,omitempty"` // 右摇杆 X (视角)
 	GpRY   int16  `json:"gp_ry,omitempty"` // 右摇杆 Y (视角)
+
+	// 识图样本 (vision)：鼠标按下/松开时同步截取的模板图引用
+	Vi    string `json:"vi,omitempty"`  // 样本名 (不含扩展名，例如 md-left-001)
+	Vx    int    `json:"vx,omitempty"`  // 光标在样本图内的偏移 X
+	Vy    int    `json:"vy,omitempty"`  // 光标在样本图内的偏移 Y
+	Vmode string `json:"vm,omitempty"`  // 匹配方式 image | color
+	Vsize int    `json:"vz,omitempty"`  // 采样边长 (32/64/128)
+
+	// 识图状态标记行 (op = "vision" / "vslot")
+	Von   *bool `json:"von,omitempty"`  // 识图开关 (仅 op=vision)
+	Vslot int   `json:"vsl,omitempty"`  // 槽位号 (op=vision / vslot)
 }
 
 // CURSORINFO 结构体用于实时判定光标是否处于隐藏状态
@@ -103,6 +114,16 @@ type StreamlineRecorder struct {
 	// 手柄上一帧状态 (差值比对，减少冗余)
 	lastGpState XINPUT_GAMEPAD
 	hasGamepad  bool
+
+	// 识图 (Vision) 采样状态：仅存在于单轮录制，PgDn 结束时清零
+	visionMu          sync.Mutex
+	visionOn          bool
+	visionSlot        int
+	visionDir         string
+	visionSeq         map[string]int
+	visionQueue       chan visionCaptureJob
+	visionQueueClosed bool
+	visionBox         *visionBox
 }
 
 // StartSmartRecordingDeprecated (已废弃旧版：保留作为历史参考)
@@ -160,6 +181,9 @@ func StartSmartRecording(destPath string, is3DMode bool) (*StreamlineRecorder, e
 		fmt.Println(" [Hardware] 检测到已连接 Xbox/XInput 游戏手柄，已开启手柄轴向与按键录制！")
 	}
 
+	// 初始化识图子系统 (默认关闭，录制中按 Pause 开启)
+	rec.visionInit(destPath)
+
 	// 1. 启动专用后台磁盘持久化写入协程 (非阻塞写盘)
 	go rec.diskWriterWorker()
 
@@ -200,6 +224,43 @@ func (r *StreamlineRecorder) pushAction(action RecordAction) {
 			// 内存队列满时的保护
 		}
 	}
+}
+
+// pushMarker 写入不影响时间轴的标记行 (识图开关 / 槽位切换)。
+// 标记行 dt 恒为 0，且不推进 lastTime，因此不会破坏动作序列的时序。
+func (r *StreamlineRecorder) pushMarker(action RecordAction) {
+	action.Dt = 0
+	data, err := json.Marshal(action)
+	if err != nil {
+		return
+	}
+	select {
+	case r.actionQueue <- data:
+	default:
+	}
+}
+
+// PushVisionMarker 写入一行识图开关标记：{"op":"vision","von":true/false,...}
+func (r *StreamlineRecorder) PushVisionMarker(on bool) {
+	p := VisionPresetAt(r.VisionSlot())
+	r.pushMarker(RecordAction{
+		Op:    "vision",
+		Von:   &on,
+		Vslot: p.Slot,
+		Vmode: p.Mode,
+		Vsize: p.Size,
+	})
+}
+
+// PushVisionSlotMarker 写入一行预设槽切换标记：{"op":"vslot","vsl":N,...}
+func (r *StreamlineRecorder) PushVisionSlotMarker() {
+	p := VisionPresetAt(r.VisionSlot())
+	r.pushMarker(RecordAction{
+		Op:    "vslot",
+		Vslot: p.Slot,
+		Vmode: p.Mode,
+		Vsize: p.Size,
+	})
 }
 
 // diskWriterWorker 后台专用落盘协程：批量高效写入磁盘，绝不干扰前台录制
@@ -325,42 +386,22 @@ func (r *StreamlineRecorder) tickerLoop() {
 		currL := (uint16(retL) & 0x8000) != 0
 		if currL != r.lastLButtonDown {
 			r.lastLButtonDown = currL
+			op := "mu"
 			if currL {
-				r.pushAction(RecordAction{
-					Op:  "md",
-					Btn: "left",
-					X:   curX,
-					Y:   curY,
-				})
-			} else {
-				r.pushAction(RecordAction{
-					Op:  "mu",
-					Btn: "left",
-					X:   curX,
-					Y:   curY,
-				})
+				op = "md"
 			}
+			r.pushAction(r.buildMouseAction(op, "left", curX, curY))
 		}
 
 		retR, _, _ := procGetAsyncKeyState.Call(0x02)
 		currR := (uint16(retR) & 0x8000) != 0
 		if currR != r.lastRButtonDown {
 			r.lastRButtonDown = currR
+			op := "mu"
 			if currR {
-				r.pushAction(RecordAction{
-					Op:  "md",
-					Btn: "right",
-					X:   curX,
-					Y:   curY,
-				})
-			} else {
-				r.pushAction(RecordAction{
-					Op:  "mu",
-					Btn: "right",
-					X:   curX,
-					Y:   curY,
-				})
+				op = "md"
 			}
+			r.pushAction(r.buildMouseAction(op, "right", curX, curY))
 		}
 		if r.hasGamepad {
 			if state, ok := GetGamepadState(0); ok {
@@ -390,6 +431,20 @@ func (r *StreamlineRecorder) tickerLoop() {
 			}
 		}
 	}
+}
+
+// buildMouseAction 组装鼠标按下/松开动作帧；识图开启时同步采样一张模板图，
+// 并把样本名与光标在样本图中的偏移写入该帧，回放时据此重新定位关键点。
+func (r *StreamlineRecorder) buildMouseAction(op, btn string, x, y int) RecordAction {
+	a := RecordAction{Op: op, Btn: btn, X: x, Y: y}
+	if name, iox, ioy, size, mode, ok := r.visionTakeSample(op, btn, x, y); ok {
+		a.Vi = name
+		a.Vx = iox
+		a.Vy = ioy
+		a.Vmode = mode
+		a.Vsize = size
+	}
+	return a
 }
 
 // listenRawInput 捕获底层的硬件鼠标相对微位移 (Raw Input)
@@ -534,5 +589,6 @@ func (r *StreamlineRecorder) listenHook() {
 func (r *StreamlineRecorder) Stop() {
 	atomic.StoreInt32(&r.stopFlag, 1)
 	hook.End()
+	r.visionCloseQueue()
 	close(r.actionQueue)
 }

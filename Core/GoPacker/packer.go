@@ -6,7 +6,9 @@ import (
 	"GoRobotScript/Core/GoPak"
 	"archive/zip"
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -18,8 +20,10 @@ import (
 var (
 	// PayloadMagicV1 旧版内嵌负载尾标（无 kind 字段，恒为 Lua）
 	PayloadMagicV1 = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V1\x00")
-	// PayloadMagic 当前内嵌负载尾标：名称/版本/类型/脚本
-	PayloadMagic   = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V2\x00")
+	// PayloadMagic 内嵌负载尾标 V2：名称/版本/类型/脚本
+	PayloadMagic = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V2\x00")
+	// PayloadMagicV3 内嵌负载尾标 V3：名称/版本/类型/脚本/附加资源(zip，识图样本)
+	PayloadMagicV3 = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V3\x00")
 	SingleExeMagic = []byte("GOKEYLUA_SINGLE_BUNDLE_V2\x00")
 )
 
@@ -160,17 +164,28 @@ func ParseMeta(scriptPath string, scriptContent string) ScriptMeta {
 // BuildRunnerPayload 把脚本负载附加到运行时模板二进制尾部。
 // kind 取值见 PayloadKindLua / PayloadKindScript，运行时据此选择 Lua 引擎或回放引擎。
 func BuildRunnerPayload(runtimeExeBytes []byte, exeName string, version string, kind string, scriptBytes []byte) ([]byte, error) {
+	return BuildRunnerPayloadEx(runtimeExeBytes, exeName, version, kind, scriptBytes, nil)
+}
+
+// BuildRunnerPayloadEx 在 BuildRunnerPayload 基础上附带一份资源负载 (zip 字节)。
+// 录制脚本的识图样本目录 (<脚本名>.vision) 就装在这里，运行时解包到缓存目录后
+// 供识图对齐读取；assets 为空时资源段长度为 0。统一输出 V3 布局，
+// 旧版 V1/V2 产物仍由读取端兼容。
+func BuildRunnerPayloadEx(runtimeExeBytes []byte, exeName string, version string, kind string, scriptBytes []byte, assets []byte) ([]byte, error) {
 	var payloadBuf bytes.Buffer
 	writeLPString(&payloadBuf, exeName)
 	writeLPString(&payloadBuf, version)
 	writeLPString(&payloadBuf, kind)
+	_ = binary.Write(&payloadBuf, binary.LittleEndian, uint32(len(scriptBytes)))
 	payloadBuf.Write(scriptBytes)
+	_ = binary.Write(&payloadBuf, binary.LittleEndian, uint32(len(assets)))
+	payloadBuf.Write(assets)
 
 	payloadRaw := payloadBuf.Bytes()
 	payloadSize := uint64(len(payloadRaw))
 
 	var trailerBuf bytes.Buffer
-	trailerBuf.Write(PayloadMagic)
+	trailerBuf.Write(PayloadMagicV3)
 	_ = binary.Write(&trailerBuf, binary.LittleEndian, payloadSize)
 
 	var result bytes.Buffer
@@ -183,14 +198,25 @@ func BuildRunnerPayload(runtimeExeBytes []byte, exeName string, version string, 
 
 // ReadEmbeddedPayload 从当前运行的可执行文件尾部读取内嵌脚本负载。
 // 返回 (程序名, 版本号, 负载类型, 脚本字节, 是否命中)；非打包产物时 found 为 false。
-// 同时兼容 V1（无 kind 字段，恒按 Lua 处理）与 V2（含 kind 字段）两种格式。
+// 兼容 V1（无 kind 字段，恒按 Lua）、V2（含 kind）与 V3（含附加资源）三种格式。
 func ReadEmbeddedPayload() (exeName string, version string, kind string, script []byte, found bool) {
-	no := func() (string, string, string, []byte, bool) { return "", "", "", nil, false }
+	name, ver, k, s, _, f := ReadEmbeddedPayloadEx()
+	return name, ver, k, s, f
+}
 
+// ReadEmbeddedPayloadEx 在 ReadEmbeddedPayload 基础上返回 V3 内嵌资源负载 (zip 字节)。
+func ReadEmbeddedPayloadEx() (exeName string, version string, kind string, script []byte, assets []byte, found bool) {
 	selfPath, err := os.Executable()
 	if err != nil {
-		return no()
+		return "", "", "", nil, nil, false
 	}
+	return ReadEmbeddedPayloadFrom(selfPath)
+}
+
+// ReadEmbeddedPayloadFrom 从指定文件尾部读取内嵌负载 (便于校验打包产物)
+func ReadEmbeddedPayloadFrom(selfPath string) (exeName string, version string, kind string, script []byte, assets []byte, found bool) {
+	no := func() (string, string, string, []byte, []byte, bool) { return "", "", "", nil, nil, false }
+
 	f, err := os.Open(selfPath)
 	if err != nil {
 		return no()
@@ -203,7 +229,7 @@ func ReadEmbeddedPayload() (exeName string, version string, kind string, script 
 	}
 	fileSize := stat.Size()
 
-	// V1 / V2 尾标等长，可统一处理
+	// V1 / V2 / V3 尾标等长，可统一处理
 	magicLen := int64(len(PayloadMagic))
 	trailerLen := magicLen + 8
 	if fileSize < trailerLen {
@@ -218,9 +244,10 @@ func ReadEmbeddedPayload() (exeName string, version string, kind string, script 
 		return no()
 	}
 
-	isV2 := bytes.Equal(trailer[:magicLen], PayloadMagic)
 	isV1 := bytes.Equal(trailer[:magicLen], PayloadMagicV1)
-	if !isV2 && !isV1 {
+	isV2 := bytes.Equal(trailer[:magicLen], PayloadMagic)
+	isV3 := bytes.Equal(trailer[:magicLen], PayloadMagicV3)
+	if !isV1 && !isV2 && !isV3 {
 		return no()
 	}
 
@@ -249,7 +276,7 @@ func ReadEmbeddedPayload() (exeName string, version string, kind string, script 
 	}
 
 	kind = PayloadKindLua // V1 恒为 Lua
-	if isV2 {
+	if isV2 || isV3 {
 		kind, err = readLPString(r)
 		if err != nil {
 			return no()
@@ -259,12 +286,152 @@ func ReadEmbeddedPayload() (exeName string, version string, kind string, script 
 		}
 	}
 
-	scriptBytes, err := io.ReadAll(r)
+	if isV3 {
+		var scriptLen uint32
+		if err := binary.Read(r, binary.LittleEndian, &scriptLen); err != nil {
+			return no()
+		}
+		script = make([]byte, scriptLen)
+		if _, err := io.ReadFull(r, script); err != nil {
+			return no()
+		}
+		var assetLen uint32
+		if err := binary.Read(r, binary.LittleEndian, &assetLen); err != nil {
+			return no()
+		}
+		if assetLen > 0 {
+			assets = make([]byte, assetLen)
+			if _, err := io.ReadFull(r, assets); err != nil {
+				return no()
+			}
+		}
+		return name, ver, kind, script, assets, true
+	}
+
+	script, err = io.ReadAll(r)
 	if err != nil {
 		return no()
 	}
 
-	return name, ver, kind, scriptBytes, true
+	return name, ver, kind, script, nil, true
+}
+
+// ---------------------------------------------------------------------------
+// 识图样本包 (zip) 打包 / 解包
+// ---------------------------------------------------------------------------
+
+// ZipDirToBytes 把目录整体压缩为 zip 字节 (相对路径保留子目录结构)
+func ZipDirToBytes(dir string) ([]byte, error) {
+	if !dirHasAnyFile(dir) {
+		return nil, fmt.Errorf("directory is empty: %s", dir)
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		w, err := zw.CreateHeader(&zip.FileHeader{
+			Name:   filepath.ToSlash(rel),
+			Method: zip.Deflate,
+		})
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	})
+	if err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// UnzipToDir 把 zip 字节解压到目标目录
+func UnzipToDir(data []byte, dir string) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return err
+	}
+	for _, entry := range zr.File {
+		name := filepath.Clean(filepath.FromSlash(entry.Name))
+		if strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
+			continue // 防目录穿越
+		}
+		dest := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		rc, err := entry.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		_, err = io.Copy(out, rc)
+		rc.Close()
+		out.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExtractEmbeddedAssets 把内嵌资源负载解压到缓存目录并返回该目录。
+// 目录名由内容哈希决定，重复运行不会重复解压，也不会互相覆盖。
+func ExtractEmbeddedAssets(data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", nil
+	}
+	sum := sha1.Sum(data)
+	name := "vision_" + hex.EncodeToString(sum[:8])
+
+	root, err := os.UserCacheDir()
+	if err != nil || root == "" {
+		root = os.TempDir()
+	}
+	root = filepath.Join(root, "GoRobotScript")
+	dir := filepath.Join(root, name)
+
+	if _, err := os.Stat(filepath.Join(dir, ".ready")); err == nil {
+		return dir, nil
+	}
+	_ = os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	if err := UnzipToDir(data, dir); err != nil {
+		return "", err
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".ready"), []byte("ok"), 0644)
+	return dir, nil
+}
+
+// VisionAssetDir 识图样本目录约定 (与 Core/GoInput.VisionAssetDir 保持一致)：
+// 与脚本同级、同名的 <脚本名>.vision 目录。
+// 例：bin/script/A.script 的样本目录为 bin/script/A.vision/
+func VisionAssetDir(scriptPath string) string {
+	base := strings.TrimSuffix(filepath.Base(scriptPath), filepath.Ext(scriptPath))
+	return filepath.Join(filepath.Dir(scriptPath), base+".vision")
 }
 
 // dirHasAnyFile 递归判断目录下是否存在任何实际文件 (空目录或仅含空子目录 => false)
@@ -346,6 +513,7 @@ func copyDirTree(src, dst string) error {
 //	.script 录制脚本：
 //	  GoRunner.exe    由 bin/GoRunner.exe 复制（回放引擎，不焊入脚本）
 //	  <脚本>.script   明文录制脚本，可直接编辑后重放
+//	  <脚本>.vision/  识图样本目录（录制时鼠标按下/松开处截取的模板图）
 //	  *.dll           依赖
 //	  用法：GoRunner.exe <脚本>.script
 func PackUnpack(opts PackOptions) error {
@@ -401,13 +569,21 @@ func PackUnpack(opts PackOptions) error {
 		return fmt.Errorf("failed to copy script: %w", err)
 	}
 
-	// 3. 明文资源目录（仅在含文件时；录制脚本无需资源）
+	// 3. 明文资源目录（仅在含文件时；录制脚本无 Asset，改为随带识图样本目录）
 	if kind == PayloadKindLua {
 		scriptDir := filepath.Dir(opts.ScriptPath)
 		assetSrc := filepath.Join(scriptDir, "Asset")
 		if dirHasAnyFile(assetSrc) {
 			if err := copyDirTree(assetSrc, filepath.Join(outDir, "Asset")); err != nil {
 				return fmt.Errorf("failed to copy Asset: %w", err)
+			}
+		}
+	} else {
+		// 识图样本：<脚本名>.vision 平移到调试目录旁，回放引擎按同名约定直接读取
+		visionSrc := VisionAssetDir(opts.ScriptPath)
+		if dirHasAnyFile(visionSrc) {
+			if err := copyDirTree(visionSrc, filepath.Join(outDir, filepath.Base(visionSrc))); err != nil {
+				return fmt.Errorf("failed to copy vision samples: %w", err)
 			}
 		}
 	}
@@ -467,12 +643,28 @@ func Pack(opts PackOptions) error {
 		}
 	}
 
+	// 录制脚本的识图样本 (<脚本名>.vision) 压缩后随负载内嵌，
+	// 运行时解包到缓存目录供识图对齐使用，保证单文件产物依然只有一个 exe。
+	var assetData []byte
+	if kind == PayloadKindScript {
+		visionDir := VisionAssetDir(opts.ScriptPath)
+		if dirHasAnyFile(visionDir) {
+			assetData, err = ZipDirToBytes(visionDir)
+			if err != nil {
+				fmt.Printf("[GoPacker] 警告: 识图样本打包失败，将不带样本发布: %v\n", err)
+				assetData = nil
+			} else {
+				fmt.Printf("[GoPacker] 识图样本已内嵌: %s (%d 字节)\n", visionDir, len(assetData))
+			}
+		}
+	}
+
 	runtimeBytes, err := os.ReadFile(opts.RunnerPath)
 	if err != nil {
 		return fmt.Errorf("failed to read GoRunner template: %w", err)
 	}
 
-	runnerBytes, err := BuildRunnerPayload(runtimeBytes, meta.ExeName, meta.Version, kind, scriptBytes)
+	runnerBytes, err := BuildRunnerPayloadEx(runtimeBytes, meta.ExeName, meta.Version, kind, scriptBytes, assetData)
 	if err != nil {
 		return err
 	}

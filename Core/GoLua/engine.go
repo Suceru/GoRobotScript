@@ -203,6 +203,7 @@ func (env *Environment) loadGoVision(L *lua.LState) int {
 		tbl.RawSetString("height", lua.LNumber(res.Height))
 		tbl.RawSetString("scale", lua.LNumber(res.Scale))
 		tbl.RawSetString("score", lua.LNumber(res.Score))
+		tbl.RawSetString("percent", lua.LNumber(res.Percent)) // 匹配度百分比 0~100 (越大越像)
 		tbl.RawSetString("centerX", lua.LNumber(res.X+res.Width/2))
 		tbl.RawSetString("centerY", lua.LNumber(res.Y+res.Height/2))
 
@@ -248,6 +249,7 @@ func (env *Environment) loadGoVision(L *lua.LState) int {
 		tbl.RawSetString("height", lua.LNumber(res.Height))
 		tbl.RawSetString("scale", lua.LNumber(res.Scale))
 		tbl.RawSetString("score", lua.LNumber(res.Score))
+		tbl.RawSetString("percent", lua.LNumber(res.Percent)) // 匹配度百分比 0~100 (越大越像)
 		tbl.RawSetString("centerX", lua.LNumber(res.X+res.Width/2))
 		tbl.RawSetString("centerY", lua.LNumber(res.Y+res.Height/2))
 

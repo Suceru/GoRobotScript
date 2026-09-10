@@ -17,7 +17,7 @@ import (
 // runEmbeddedPayload 检测本程序是否为 GoPacker 打包产物；
 // 命中后按负载类型分派：Lua 脚本走 Lua 引擎，录制脚本(.script) 走回放引擎。
 func runEmbeddedPayload() bool {
-	name, ver, kind, payload, found := GoPacker.ReadEmbeddedPayload()
+	name, ver, kind, payload, assets, found := GoPacker.ReadEmbeddedPayloadEx()
 	if !found {
 		return false
 	}
@@ -45,6 +45,7 @@ func runEmbeddedPayload() bool {
 		// 打包产物同样支持 -f (直接播放到底) 与 -t (倍速)
 		fast := false
 		speed := 1.0
+		threshold := 0.0
 		for i := 1; i < len(os.Args); i++ {
 			switch os.Args[i] {
 			case "-f":
@@ -56,11 +57,36 @@ func runEmbeddedPayload() bool {
 					}
 					i++
 				}
+			case "-vt":
+				if i+1 < len(os.Args) {
+					if v, perr := strconv.ParseFloat(os.Args[i+1], 64); perr == nil && v > 0 {
+						threshold = v
+					}
+					i++
+				}
+			}
+		}
+
+		// 内嵌识图样本：解包到缓存目录后交给回放引擎做关键点对齐；
+		// 未内嵌样本时退回 <exe目录>/vision/
+		visionDir := filepath.Join(baseDir, "vision")
+		if len(assets) > 0 {
+			dir, aerr := GoPacker.ExtractEmbeddedAssets(assets)
+			if aerr != nil {
+				fmt.Fprintf(os.Stderr, "[警告] 识图样本解包失败: %v\n", aerr)
+			} else {
+				visionDir = dir
 			}
 		}
 
 		runner := GoRunner.NewRunner(baseDir)
-		if err := runner.RunRecordFromBytes(payload, GoRunner.PlayOptions{FastMode: fast, SpeedScale: speed}); err != nil {
+		opts := GoRunner.PlayOptions{
+			FastMode:         fast,
+			SpeedScale:       speed,
+			VisionDir:        visionDir,
+			VisionSimilarity: threshold,
+		}
+		if err := runner.RunRecordFromBytes(payload, opts); err != nil {
 			fmt.Fprintf(os.Stderr, "\n[ERROR] 脚本回放失败: %v\n", err)
 			fmt.Println("按回车键退出...")
 			var dummy string
@@ -128,12 +154,17 @@ func main() {
 		fmt.Println(" 快捷键与音频提示:")
 		fmt.Println("   • [PgUp] 首次按下:  开始录制 (双声上扬提示音)")
 		fmt.Println("   • [PgUp] 再次按下:  暂停 / 继续 切换 (暂停双低音 / 继续单高音)")
-		fmt.Println("   • [PgDn] 按一下:    结束录制并自动保存 (两声下降提示音)")
+		fmt.Println("   • [Pause] 按一下:   识图开启 / 关闭 切换 (状态显示在固定位置同一行)")
+		fmt.Println("   • [Home] 短按:      识图开启时切换预设槽 (槽1~3=图像32/64/128, 槽4~6=颜色32/64/128)")
+		fmt.Println("   • [Home] 长按:      开关光标绘图框 (红框跟随鼠标，显示本枪截图范围，点击穿透不影响游戏)")
+		fmt.Println("   • [End] 按一下:     识图预设槽后退一个")
+		fmt.Println("   • [PgDn] 按一下:    结束录制并自动保存 (两声下降提示音，同时退出识图)")
 		fmt.Println()
 		fmt.Println(" 常用命令行扩展:")
 		fmt.Println("   • 回放执行:   GoRunner.exe <脚本路径.script | 脚本路径.lua>")
 		fmt.Println("   • 快速回放:   GoRunner.exe -f <脚本路径.script>")
 		fmt.Println("   • 倍速回放:   GoRunner.exe -t 1.5 <脚本路径.script>")
+		fmt.Println("   • 识图阈值:   GoRunner.exe -vt 0.10 <脚本路径.script>")
 		fmt.Println("==========================================================")
 		fmt.Println("请切换至目标游戏/窗口，随时按下 [PgUp] 即可开始录制...")
 
@@ -161,7 +192,11 @@ func main() {
 		fmt.Println(" 操作快捷键与音频提示:")
 		fmt.Println("   • [PgUp] 首次按:  开始录制 (两声上扬提示音)")
 		fmt.Println("   • [PgUp] 再次按:  暂停 / 继续 切换 (暂停双低音 / 继续单高音)")
-		fmt.Println("   • [PgDn] 按一下:  结束录制并自动保存 (两声下降提示音)")
+		fmt.Println("   • [Pause] 按一下: 识图开启 / 关闭 切换 (固定位置同一行显示状态)")
+		fmt.Println("   • [Home] 短按:   识图开启时切换预设槽 (槽1~3=图像32/64/128, 槽4~6=颜色32/64/128)")
+		fmt.Println("   • [Home] 长按:   开关光标绘图框 (红框跟随鼠标，点击穿透不影响游戏)")
+		fmt.Println("   • [End] 按一下:  识图预设槽后退一个")
+		fmt.Println("   • [PgDn] 按一下: 结束录制并自动保存 (两声下降提示音，同时退出识图)")
 		fmt.Println("==========================================================")
 		rec, err := GoInput.StartSmartRecording(outPath, is3D)
 		if err != nil {
@@ -180,10 +215,28 @@ func main() {
 		return
 	}
 
-	// 解析播放参数: -f (快速播放到底), -t (播放倍率)
+	// 解析播放参数: -f (快速播放到底), -t (播放倍率), -vt (识图匹配阈值)
 	fs := flag.NewFlagSet("runner", flag.ExitOnError)
 	fastMode := fs.Bool("f", false, "无需按键确认，直接执行播放到结束")
 	speedScale := fs.Float64("t", 1.0, "指定播放时间缩放倍率 (例如 1.2 加速, 0.8 减速)")
+	visionSim := fs.Float64("vs", GoRunner.DefaultVisionSimilarity, "识图匹配度阈值 (百分比 0~100，越大越严格)")
+	visionMinScale := fs.Float64("vmin", 0.9, "识图匹配缩放下限 (游戏分辨率与录制时不同时放宽)")
+	visionMaxScale := fs.Float64("vmax", 1.1, "识图匹配缩放上限")
+	visionBlur := fs.Int("vblur", GoRunner.DefaultVisionBlur,
+		"识图匹配前高斯模糊核 (抵消动态模糊/锐化/分辨率差异)，<=1 关闭")
+	visionDir := fs.String("vdir", "", "识图样本目录 (默认按 <脚本名>.vision 自动推导)")
+	visionFast := fs.Int("vfast", GoRunner.DefaultVisionLookahead, "识图预取窗口：提前识别后续多少个关键点；0 关闭预取")
+	visionWide := fs.Int("vcache", GoRunner.DefaultVisionCacheFactor, "识图快速区域边长 = 样本边长 × 该系数")
+	visionTol := fs.Int("vtol", GoRunner.DefaultVisionFastTol, "识别结果复核的位置容差 (像素)")
+	visionRot := fs.Float64("vrot", GoRunner.DefaultVisionMaxRotation,
+		"识图允许的最大旋转角 (度)：超出即放弃旋转/拉伸、退回纯平移，防止路径被瞬间横拉")
+	visionPair := fs.Int("vpair", GoRunner.DefaultVisionPairTol,
+		"同键对复用阈值 (像素)：鼠标按下/松开位移不超过它时，松开那张图复用按下那张图的识别结果")
+	visionConf := fs.Float64("vconf", GoRunner.DefaultVisionRegionConfirm,
+		"受限区域(=缩小的搜索范围)结果的置信度门槛 (百分比 0~100)：区域内只是局部最优，"+
+			"达不到门槛就扩大范围重找，直到全屏；0 或负数关闭门控")
+	visionSettle := fs.Int("vsettle", GoRunner.DefaultVisionSettleMs,
+		"点击前等待界面看到光标到位的时间 (毫秒)：仅当光标在点击瞬间刚被复核修正挪动过才生效；0 关闭")
 
 	_ = fs.Parse(os.Args[1:])
 	remainingArgs := fs.Args()
@@ -195,9 +248,26 @@ func main() {
 		target = arg1
 	}
 
+	settleMs := *visionSettle
+	if settleMs <= 0 {
+		settleMs = -1 // 显式关闭（不传则是默认 30ms）
+	}
+
 	opts := GoRunner.PlayOptions{
-		FastMode:   *fastMode,
-		SpeedScale: *speedScale,
+		FastMode:            *fastMode,
+		SpeedScale:          *speedScale,
+		VisionDir:           *visionDir,
+		VisionSimilarity:    *visionSim,
+		VisionBlur:          *visionBlur,
+		VisionMinScale:      *visionMinScale,
+		VisionMaxScale:      *visionMaxScale,
+		VisionLookahead:     *visionFast,
+		VisionCacheFactor:   *visionWide,
+		VisionFastTol:       *visionTol,
+		VisionMaxRotation:   *visionRot,
+		VisionPairTol:       *visionPair,
+		VisionRegionConfirm: *visionConf,
+		VisionSettleMs:      settleMs,
 	}
 
 	runner := GoRunner.NewRunner(filepath.Dir(target))
