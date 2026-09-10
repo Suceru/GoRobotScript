@@ -18,6 +18,11 @@ if (Test-Path $LibsDir) {
     Copy-Item -Path "$LibsDir\*" -Destination $BinDir -Force
 }
 
+# 基础模块版本号：决定打包产物解压时使用的共享 base 目录
+$BaseVersionFile = Join-Path $LibsDir "base.version"
+$BaseVersion = if (Test-Path $BaseVersionFile) { (Get-Content $BaseVersionFile -Raw).Trim() } else { "1.0.0" }
+Write-Host " [Base] Base module version: $BaseVersion  (packs extract to base\b_${BaseVersion}_<hash>\)"
+
 # 检测并静默安装虚拟手柄总线驱动 ViGEmBus
 Write-Host "Checking ViGEmBus driver status..."
 $vigemService = Get-Service -Name "ViGEmBus" -ErrorAction SilentlyContinue
@@ -51,20 +56,23 @@ if ($null -eq $vigemService) {
     Write-Host " [PASS] ViGEmBus driver is active and running ($($vigemService.Status))." -ForegroundColor Green
 }
 
-# 仅编译三大核心工具
-Write-Host "Building GoRunner.exe (Unified Runner)..."
+# 编译核心模块；产出与 Core/ 下的模块目录一一对应
+#   bin 下只放 2 个用户工具 + 2 个 .apppak 载荷 + 依赖 DLL：
+#   Core/GoRunner              -> bin/GoRunner.exe         (录制 + 回放)        用户工具
+#   Core/GoPacker              -> bin/GoPacker.exe         (打包 + -unpak 调试) 用户工具
+#   Core/GoLua                 -> bin/GoLua.apppak         (Lua 运行时载荷，-unpak 时复制改名为可执行程序)
+#   Core/GoPacker/SingleLoader -> bin/SingleLoader.apppak  (单文件引导器载荷，单文件打包时拼接到产物开头)
+Write-Host "Building GoRunner.exe (from Core/GoRunner)..."
 go build -o "$BinDir\GoRunner.exe" ./Core/GoRunner/RunnerCLI
-Copy-Item "$BinDir\GoRunner.exe" "$BinDir\GokeyLua.exe" -Force
-Copy-Item "$BinDir\GoRunner.exe" "$BinDir\GokeyRun.exe" -Force
 
-Write-Host "Building PackLua.exe (Script & Asset Packer)..."
-go build -o "$BinDir\PackLua.exe" ./Core/GoPacker/PackerCLI
+Write-Host "Building GoPacker.exe (from Core/GoPacker)..."
+go build -o "$BinDir\GoPacker.exe" ./Core/GoPacker/PackerCLI
 
-Write-Host "Building SingleLoader.exe (Standalone Loader Template)..."
-go build -o "$BinDir\SingleLoader.exe" ./Core/GoPacker/SingleLoader
+Write-Host "Building GoLua.apppak (Lua runtime payload, from Core/GoLua)..."
+go build -o "$BinDir\GoLua.apppak" ./Core/GoLua/LuaCLI
 
-# 清理 bin 中非核心旧二进制
-Remove-Item -Path "$BinDir\GoHotkey.exe", "$BinDir\GokeyHotkey.exe", "$BinDir\GoRecord.exe", "$BinDir\GokeyLog.exe", "$BinDir\GoLua.exe" -Force -ErrorAction SilentlyContinue
+Write-Host "Building SingleLoader.apppak (bootstrap payload, from Core/GoPacker/SingleLoader)..."
+go build -o "$BinDir\SingleLoader.apppak" ./Core/GoPacker/SingleLoader
 
 Write-Host "=========================================================="
 Write-Host "Core build completed successfully!"

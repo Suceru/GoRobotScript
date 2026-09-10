@@ -2,110 +2,15 @@ package main
 
 import (
 	"GoRobotScript/Core/GoLua"
-	"bytes"
-	"encoding/binary"
+	"GoRobotScript/Core/GoPacker"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	lua "github.com/yuin/gopher-lua"
 )
-
-var payloadMagic = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V1\x00")
-
-type EmbeddedPayload struct {
-	ExeName string
-	Version string
-	Script  string
-}
-
-func readEmbeddedPayload() (*EmbeddedPayload, error) {
-	exePath, err := os.Executable()
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(exePath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	stat, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	fileSize := stat.Size()
-	magicLen := int64(len(payloadMagic))
-	trailerLen := magicLen + 8
-
-	if fileSize < trailerLen {
-		return nil, nil
-	}
-
-	if _, err := f.Seek(-trailerLen, io.SeekEnd); err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, trailerLen)
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return nil, err
-	}
-
-	if !bytes.Equal(buf[:magicLen], payloadMagic) {
-		return nil, nil
-	}
-
-	payloadSize := binary.LittleEndian.Uint64(buf[magicLen:])
-	payloadOffset := fileSize - trailerLen - int64(payloadSize)
-	if payloadOffset < 0 {
-		return nil, fmt.Errorf("corrupt embedded payload size: %d", payloadSize)
-	}
-
-	if _, err := f.Seek(payloadOffset, io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	payloadBytes := make([]byte, payloadSize)
-	if _, err := io.ReadFull(f, payloadBytes); err != nil {
-		return nil, err
-	}
-
-	if len(payloadBytes) < 8 {
-		return nil, fmt.Errorf("invalid payload format")
-	}
-
-	r := bytes.NewReader(payloadBytes)
-	var nameLen uint32
-	if err := binary.Read(r, binary.LittleEndian, &nameLen); err != nil {
-		return nil, err
-	}
-	nameBytes := make([]byte, nameLen)
-	if _, err := io.ReadFull(r, nameBytes); err != nil {
-		return nil, err
-	}
-
-	var verLen uint32
-	if err := binary.Read(r, binary.LittleEndian, &verLen); err != nil {
-		return nil, err
-	}
-	verBytes := make([]byte, verLen)
-	if _, err := io.ReadFull(r, verBytes); err != nil {
-		return nil, err
-	}
-
-	scriptBytes, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-
-	return &EmbeddedPayload{
-		ExeName: string(nameBytes),
-		Version: string(verBytes),
-		Script:  string(scriptBytes),
-	}, nil
-}
 
 func registerAppMeta(L *lua.LState, name, ver string) {
 	L.SetGlobal("AppInfo", L.NewFunction(func(L *lua.LState) int {
@@ -140,6 +45,40 @@ func registerAppMeta(L *lua.LState, name, ver string) {
 	}))
 }
 
+// autoDetectScript 在无参数启动时推断要执行的脚本：
+// 1) 与可执行文件同名的 .lua  2) main.lua  3) 目录内唯一的 .lua
+func autoDetectScript(dir string) string {
+	exePath, _ := os.Executable()
+	exeBase := strings.TrimSuffix(filepath.Base(exePath), filepath.Ext(exePath))
+
+	// 若可执行文件被改名为 <AppName>.exe，则同时尝试去掉 .pak 后缀的原始名
+	candidates := []string{
+		filepath.Join(dir, exeBase+".lua"),
+		filepath.Join(dir, "main.lua"),
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+
+	// 兜底：目录下只有一个 .lua 时直接用它
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var found []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".lua") {
+			found = append(found, filepath.Join(dir, e.Name()))
+		}
+	}
+	if len(found) == 1 {
+		return found[0]
+	}
+	return ""
+}
+
 func main() {
 	exePath, _ := os.Executable()
 	exeDir := filepath.Dir(exePath)
@@ -149,17 +88,20 @@ func main() {
 
 	_ = env.LoadAssets()
 
-	payload, err := readEmbeddedPayload()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[Embedded Runtime Error] %v\n", err)
-		os.Exit(1)
-	}
-
-	if payload != nil {
-		registerAppMeta(env.L, payload.ExeName, payload.Version)
+	// 内嵌负载：统一交由 GoPacker 读取（自动兼容 V1/V2 两种包格式）
+	if pName, pVer, pKind, pScript, found := GoPacker.ReadEmbeddedPayload(); found {
+		if pKind == GoPacker.PayloadKindScript {
+			fmt.Fprintf(os.Stderr, "[Embedded Runtime Error] 本程序内嵌的是录制脚本(.script)，需要回放引擎。\n")
+			fmt.Fprintf(os.Stderr, "  请使用 GoRunner.exe 运行，或改用 GoPacker 重新打包。\n")
+			fmt.Println("Press Enter to exit...")
+			var dummy string
+			fmt.Scanln(&dummy)
+			os.Exit(1)
+		}
+		registerAppMeta(env.L, pName, pVer)
 		_ = os.Chdir(exeDir)
 
-		if err := env.ExecuteString(payload.Script); err != nil {
+		if err := env.ExecuteString(string(pScript)); err != nil {
 			fmt.Fprintf(os.Stderr, "[Execution Error] %v\n", err)
 			fmt.Println("Press Enter to exit...")
 			var dummy string
@@ -174,8 +116,23 @@ func main() {
 	scriptpath := flag.String("script", "path", "Script Path")
 	flag.Parse()
 
+	// 无参数：优先执行同目录下的同名脚本，其次 main.lua，最后若目录内只有一个 .lua 则执行它。
+	// 这样调试目录（GoPacker -unpak 的产物）可以直接双击启动。
 	if len(os.Args) == 1 {
-		fmt.Fprintf(os.Stderr, "Usage: GoLua.exe [script.lua]\n")
+		target := autoDetectScript(exeDir)
+		if target == "" {
+			fmt.Fprintf(os.Stderr, "Usage: GoLua.exe [script.lua]\n")
+			fmt.Fprintf(os.Stderr, "  或把 .lua 放在本程序同目录后直接双击运行。\n")
+			return
+		}
+		fmt.Printf("[GoLua] 自动执行: %s\n", target)
+		if err := env.ExecuteFile(target); err != nil {
+			fmt.Fprintf(os.Stderr, "[Execution Error] %v\n", err)
+			fmt.Println("按回车键退出...")
+			var dummy string
+			fmt.Scanln(&dummy)
+			os.Exit(1)
+		}
 		return
 	}
 

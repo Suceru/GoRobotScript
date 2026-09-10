@@ -5,8 +5,10 @@ import (
 	"GoRobotScript/Core/GoInput"
 	"GoRobotScript/Core/GoLua"
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -80,13 +82,29 @@ func (r *Runner) RunRecordScriptWithOptions(scriptPath string, opts PlayOptions)
 	}
 	defer file.Close()
 
-	if opts.SpeedScale <= 0 {
-		opts.SpeedScale = 1.0
-	}
-
 	// 读取所有动作帧到内存，确保快速回放不被磁盘 I/O 阻塞
+	rawLines, err := scanActionLines(file)
+	if err != nil {
+		return err
+	}
+	return r.runRecordLines(rawLines, opts)
+}
+
+// RunRecordFromBytes 直接回放内存中的录制脚本内容（供打包产物内嵌脚本使用，无需落地临时文件）
+func (r *Runner) RunRecordFromBytes(data []byte, opts PlayOptions) error {
+	rawLines, err := scanActionLines(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	return r.runRecordLines(rawLines, opts)
+}
+
+// scanActionLines 逐行读取动作帧（跳过空行）
+func scanActionLines(rd io.Reader) ([][]byte, error) {
 	var rawLines [][]byte
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(rd)
+	// 单行可能较长（含手柄轴向等字段），放宽缓冲区上限
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		b := scanner.Bytes()
 		if len(b) > 0 {
@@ -96,7 +114,15 @@ func (r *Runner) RunRecordScriptWithOptions(scriptPath string, opts PlayOptions)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return nil, err
+	}
+	return rawLines, nil
+}
+
+// runRecordLines 回放主循环
+func (r *Runner) runRecordLines(rawLines [][]byte, opts PlayOptions) error {
+	if opts.SpeedScale <= 0 {
+		opts.SpeedScale = 1.0
 	}
 
 	var playingFlag int32
@@ -186,10 +212,10 @@ func (r *Runner) RunRecordScriptWithOptions(scriptPath string, opts PlayOptions)
 		}
 	}
 
-	// 播放结束时，若使用了虚拟手柄，安全归中并释放
+	// 播放结束时，若使用了虚拟手柄，安全归中并彻底释放，避免摇杆卡死残留
 	vg, _ := GoInput.GetOrInitVirtualGamepad()
 	if vg != nil {
-		vg.SendReport(0, 0, 0, 0, 0, 0, 0)
+		vg.Close()
 	}
 
 	GoInput.SoundStop()

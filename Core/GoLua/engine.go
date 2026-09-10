@@ -6,6 +6,7 @@ import (
 	"GoRobotScript/Core/GoInput"
 	"GoRobotScript/Core/GoPak"
 	"GoRobotScript/Core/GoVision"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,11 @@ func NewEnvironment(baseDir string) *Environment {
 		}
 	}
 
+	// 统一转成绝对路径：AssetPath() 依赖它，相对路径会随进程工作目录变化而失效
+	if abs, err := filepath.Abs(baseDir); err == nil {
+		baseDir = abs
+	}
+
 	assetDir := filepath.Join(baseDir, "Asset")
 
 	env := &Environment{
@@ -54,23 +60,47 @@ func (env *Environment) Close() {
 	}
 }
 
+// isZipArchive 通过文件头判断是否为真正的 zip 归档（资源包 .pak）
+// 目的：目录中可能存在非 zip 的 .pak 同名文件，不应被当作资源包处理。
+func isZipArchive(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, 2)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return false
+	}
+	return string(head) == "PK"
+}
+
 // LoadAssets extracts any existing .pak asset archive in baseDir into AssetDir,
 // ensuring that resources under /Asset are ready for execution.
+// 若不存在任何有效 .pak（即该程序无资源），则不创建 Asset 目录。
 func (env *Environment) LoadAssets() error {
 	// 1. Check if there is a .pak file in AppPath
+	foundPak := false
 	entries, err := os.ReadDir(env.AppPath)
 	if err == nil {
 		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".pak") {
-				pakPath := filepath.Join(env.AppPath, e.Name())
-				// Extract into baseDir so that files under "Asset/..." extract into baseDir/Asset/...
-				_, _ = GoPak.ExtractPak(pakPath, env.AppPath, false)
+			if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".pak") {
+				continue
 			}
+			pakPath := filepath.Join(env.AppPath, e.Name())
+			if !isZipArchive(pakPath) {
+				continue // 非 zip（例如被改名的可执行载荷），跳过
+			}
+			// Extract into baseDir so that files under "Asset/..." extract into baseDir/Asset/...
+			_, _ = GoPak.ExtractPak(pakPath, env.AppPath, false)
+			foundPak = true
 		}
 	}
 
-	// 2. Ensure Asset directory exists
-	_ = os.MkdirAll(env.AssetDir, 0755)
+	// 2. 仅在确有资源包时才确保 Asset 目录存在，避免无资源程序凭空产生空目录
+	if foundPak {
+		_ = os.MkdirAll(env.AssetDir, 0755)
+	}
 	return nil
 }
 
@@ -424,7 +454,117 @@ func (env *Environment) loadGoInput(L *lua.LState) int {
 		return 0
 	}))
 
-	// 虚拟手柄操作接口
+	// ===== 虚拟手柄 (Xbox 360) 精简操作接口 =====
+	// 全部通道一次提交，字段缺省即保持原值，与录制脚本 gp 帧一一对应。
+
+	// BTN 按键掩码常量表，可直接相加组合：pad.BTN.A + pad.BTN.LB
+	btnTable := L.NewTable()
+	for name, mask := range GoInput.ButtonNames() {
+		btnTable.RawSetString(name, lua.LNumber(mask))
+	}
+	L.SetField(mod, "BTN", btnTable)
+
+	// 解析 buttons 字段：支持数字掩码 / 名称字符串 / 名称数组
+	parseButtons := func(L *lua.LState, v lua.LValue) uint16 {
+		switch val := v.(type) {
+		case lua.LNumber:
+			return uint16(val)
+		case lua.LString:
+			return GoInput.ButtonsFromNames([]string{string(val)})
+		case *lua.LTable:
+			var names []string
+			val.ForEach(func(_, item lua.LValue) {
+				if n, ok := item.(lua.LString); ok {
+					names = append(names, string(n))
+				} else if num, ok := item.(lua.LNumber); ok {
+					names = append(names, "")
+					_ = num
+				}
+			})
+			return GoInput.ButtonsFromNames(names)
+		}
+		return 0
+	}
+
+	// Gamepad([lx, ly]) 或 Gamepad{ lx=, ly=, rx=, ry=, lt=, rt=, buttons= }
+	L.SetField(mod, "Gamepad", L.NewFunction(func(L *lua.LState) int {
+		vg, err := GoInput.GetOrInitVirtualGamepad()
+		if err != nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+
+		st := vg.State()
+		arg1 := L.Get(1)
+
+		if tbl, ok := arg1.(*lua.LTable); ok {
+			getNum := func(key string, apply func(int16)) {
+				if v := L.GetField(tbl, key); v != lua.LNil {
+					if n, ok := v.(lua.LNumber); ok {
+						apply(int16(n))
+					}
+				}
+			}
+			getNum("lx", func(n int16) { st.LX = n })
+			getNum("ly", func(n int16) { st.LY = n })
+			getNum("rx", func(n int16) { st.RX = n })
+			getNum("ry", func(n int16) { st.RY = n })
+			if v := L.GetField(tbl, "lt"); v != lua.LNil {
+				if n, ok := v.(lua.LNumber); ok {
+					st.LT = uint8(n)
+				}
+			}
+			if v := L.GetField(tbl, "rt"); v != lua.LNil {
+				if n, ok := v.(lua.LNumber); ok {
+					st.RT = uint8(n)
+				}
+			}
+			if v := L.GetField(tbl, "buttons"); v != lua.LNil {
+				st.Buttons = parseButtons(L, v)
+			}
+		} else if arg1 != lua.LNil {
+			st.LX = int16(L.CheckInt(1))
+			if L.GetTop() >= 2 {
+				st.LY = int16(L.CheckInt(2))
+			}
+		}
+
+		ok := vg.Apply(st)
+		L.Push(lua.LBool(ok))
+		return 1
+	}))
+
+	// GamepadReset() 全通道归零 (摇杆回中、扳机松开、按键弹起)
+	L.SetField(mod, "GamepadReset", L.NewFunction(func(L *lua.LState) int {
+		vg, err := GoInput.GetOrInitVirtualGamepad()
+		if err != nil {
+			L.Push(lua.LBool(false))
+			return 1
+		}
+		L.Push(lua.LBool(vg.Reset()))
+		return 1
+	}))
+
+	// GamepadSlots() 返回当前已连接的手柄 XInput 槽位数组 (0~3)
+	L.SetField(mod, "GamepadSlots", L.NewFunction(func(L *lua.LState) int {
+		tbl := L.NewTable()
+		for _, s := range GoInput.ConnectedGamepadSlots() {
+			tbl.Append(lua.LNumber(s))
+		}
+		L.Push(tbl)
+		return 1
+	}))
+
+	// GamepadClose() 释放虚拟手柄
+	L.SetField(mod, "GamepadClose", L.NewFunction(func(L *lua.LState) int {
+		if vg, err := GoInput.GetOrInitVirtualGamepad(); err == nil && vg != nil {
+			vg.Close()
+		}
+		return 0
+	}))
+
+	// 兼容旧接口
 	L.SetField(mod, "GamepadLeftStick", L.NewFunction(func(L *lua.LState) int {
 		lx := int16(L.CheckInt(1))
 		ly := int16(L.CheckInt(2))
@@ -434,8 +574,7 @@ func (env *Environment) loadGoInput(L *lua.LState) int {
 			L.Push(lua.LString(err.Error()))
 			return 2
 		}
-		ok := vg.SetLeftStick(lx, ly)
-		L.Push(lua.LBool(ok))
+		L.Push(lua.LBool(vg.SetLeftStick(lx, ly)))
 		return 1
 	}))
 	L.SetField(mod, "GamepadRightStick", L.NewFunction(func(L *lua.LState) int {
@@ -447,16 +586,8 @@ func (env *Environment) loadGoInput(L *lua.LState) int {
 			L.Push(lua.LString(err.Error()))
 			return 2
 		}
-		ok := vg.SetRightStick(rx, ry)
-		L.Push(lua.LBool(ok))
+		L.Push(lua.LBool(vg.SetRightStick(rx, ry)))
 		return 1
-	}))
-	L.SetField(mod, "GamepadClose", L.NewFunction(func(L *lua.LState) int {
-		vg, _ := GoInput.GetOrInitVirtualGamepad()
-		if vg != nil {
-			vg.Close()
-		}
-		return 0
 	}))
 
 	L.Push(mod)

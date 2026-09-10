@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,9 +16,76 @@ import (
 )
 
 var (
-	PayloadMagic   = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V1\x00")
+	// PayloadMagicV1 旧版内嵌负载尾标（无 kind 字段，恒为 Lua）
+	PayloadMagicV1 = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V1\x00")
+	// PayloadMagic 当前内嵌负载尾标：名称/版本/类型/脚本
+	PayloadMagic   = []byte("GOKEYLUA_EMBEDDED_PAYLOAD_V2\x00")
 	SingleExeMagic = []byte("GOKEYLUA_SINGLE_BUNDLE_V2\x00")
 )
+
+// 内嵌负载类型：决定运行时用哪种引擎执行
+const (
+	PayloadKindLua    = "lua"    // Lua 自动化脚本 → 走 Lua 引擎
+	PayloadKindScript = "script" // 录制回放脚本 (JSON Lines) → 走回放引擎
+)
+
+// KindFromPath 根据脚本扩展名推断负载类型
+func KindFromPath(path string) string {
+	if strings.EqualFold(filepath.Ext(path), ".script") {
+		return PayloadKindScript
+	}
+	return PayloadKindLua
+}
+
+// writeLPString 写入 uint32 长度前缀字符串
+func writeLPString(buf *bytes.Buffer, s string) {
+	b := []byte(s)
+	_ = binary.Write(buf, binary.LittleEndian, uint32(len(b)))
+	buf.Write(b)
+}
+
+// readLPString 读取 uint32 长度前缀字符串
+func readLPString(r *bytes.Reader) (string, error) {
+	var n uint32
+	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
+		return "", err
+	}
+	b := make([]byte, n)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// BaseMetaName 基础模块(DLL)版本标记在包内的条目名
+const BaseMetaName = "_base.meta"
+
+// BaseVersionFile 基础模块版本号文件名，位于 DLL 目录中
+const BaseVersionFile = "base.version"
+
+// DefaultBaseVersion 未提供 base.version 时使用的默认基础模块版本
+const DefaultBaseVersion = "1.0.0"
+
+// ReadBaseVersion 读取基础模块版本号 (优先 <dllDir>/base.version，其次默认值)
+func ReadBaseVersion(dllDir string) string {
+	candidates := []string{
+		filepath.Join(dllDir, BaseVersionFile),
+		filepath.Join(dllDir, "..", BaseVersionFile),
+	}
+	for _, p := range candidates {
+		if data, err := os.ReadFile(p); err == nil {
+			v := strings.TrimSpace(string(data))
+			v = strings.TrimPrefix(v, "\xef\xbb\xbf")
+			if i := strings.IndexAny(v, "\r\n"); i >= 0 {
+				v = strings.TrimSpace(v[:i])
+			}
+			if v != "" {
+				return v
+			}
+		}
+	}
+	return DefaultBaseVersion
+}
 
 type ScriptMeta struct {
 	ExeName    string
@@ -89,18 +157,13 @@ func ParseMeta(scriptPath string, scriptContent string) ScriptMeta {
 	return meta
 }
 
-// BuildRunnerPayload attaches Lua script to runtime template binary.
-func BuildRunnerPayload(runtimeExeBytes []byte, exeName string, version string, scriptBytes []byte) ([]byte, error) {
+// BuildRunnerPayload 把脚本负载附加到运行时模板二进制尾部。
+// kind 取值见 PayloadKindLua / PayloadKindScript，运行时据此选择 Lua 引擎或回放引擎。
+func BuildRunnerPayload(runtimeExeBytes []byte, exeName string, version string, kind string, scriptBytes []byte) ([]byte, error) {
 	var payloadBuf bytes.Buffer
-	nameBytes := []byte(exeName)
-	verBytes := []byte(version)
-
-	_ = binary.Write(&payloadBuf, binary.LittleEndian, uint32(len(nameBytes)))
-	payloadBuf.Write(nameBytes)
-
-	_ = binary.Write(&payloadBuf, binary.LittleEndian, uint32(len(verBytes)))
-	payloadBuf.Write(verBytes)
-
+	writeLPString(&payloadBuf, exeName)
+	writeLPString(&payloadBuf, version)
+	writeLPString(&payloadBuf, kind)
 	payloadBuf.Write(scriptBytes)
 
 	payloadRaw := payloadBuf.Bytes()
@@ -118,17 +181,268 @@ func BuildRunnerPayload(runtimeExeBytes []byte, exeName string, version string, 
 	return result.Bytes(), nil
 }
 
+// ReadEmbeddedPayload 从当前运行的可执行文件尾部读取内嵌脚本负载。
+// 返回 (程序名, 版本号, 负载类型, 脚本字节, 是否命中)；非打包产物时 found 为 false。
+// 同时兼容 V1（无 kind 字段，恒按 Lua 处理）与 V2（含 kind 字段）两种格式。
+func ReadEmbeddedPayload() (exeName string, version string, kind string, script []byte, found bool) {
+	no := func() (string, string, string, []byte, bool) { return "", "", "", nil, false }
+
+	selfPath, err := os.Executable()
+	if err != nil {
+		return no()
+	}
+	f, err := os.Open(selfPath)
+	if err != nil {
+		return no()
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return no()
+	}
+	fileSize := stat.Size()
+
+	// V1 / V2 尾标等长，可统一处理
+	magicLen := int64(len(PayloadMagic))
+	trailerLen := magicLen + 8
+	if fileSize < trailerLen {
+		return no()
+	}
+
+	if _, err := f.Seek(-trailerLen, io.SeekEnd); err != nil {
+		return no()
+	}
+	trailer := make([]byte, trailerLen)
+	if _, err := io.ReadFull(f, trailer); err != nil {
+		return no()
+	}
+
+	isV2 := bytes.Equal(trailer[:magicLen], PayloadMagic)
+	isV1 := bytes.Equal(trailer[:magicLen], PayloadMagicV1)
+	if !isV2 && !isV1 {
+		return no()
+	}
+
+	payloadSize := int64(binary.LittleEndian.Uint64(trailer[magicLen:]))
+	payloadOffset := fileSize - trailerLen - payloadSize
+	if payloadOffset < 0 {
+		return no()
+	}
+
+	if _, err := f.Seek(payloadOffset, io.SeekStart); err != nil {
+		return no()
+	}
+	payload := make([]byte, payloadSize)
+	if _, err := io.ReadFull(f, payload); err != nil {
+		return no()
+	}
+
+	r := bytes.NewReader(payload)
+	name, err := readLPString(r)
+	if err != nil {
+		return no()
+	}
+	ver, err := readLPString(r)
+	if err != nil {
+		return no()
+	}
+
+	kind = PayloadKindLua // V1 恒为 Lua
+	if isV2 {
+		kind, err = readLPString(r)
+		if err != nil {
+			return no()
+		}
+		if kind == "" {
+			kind = PayloadKindLua
+		}
+	}
+
+	scriptBytes, err := io.ReadAll(r)
+	if err != nil {
+		return no()
+	}
+
+	return name, ver, kind, scriptBytes, true
+}
+
+// dirHasAnyFile 递归判断目录下是否存在任何实际文件 (空目录或仅含空子目录 => false)
+func dirHasAnyFile(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			if dirHasAnyFile(filepath.Join(dir, e.Name())) {
+				return true
+			}
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // PackOptions defines packing targets and locations.
 type PackOptions struct {
 	ScriptPath       string
 	OutputDir        string
-	GokeyLuaPath     string
+	BinDir           string // bin/ 目录：单文件模式取运行时模板与 DLL，unpak 模式输出到 <BinDir>/run/
+	RunnerPath       string // Core/GoRunner 产物 (GoRunner.exe)，作为内嵌运行时模板
 	SingleLoaderPath string
 	DllDir           string
+	UnpackMode       bool // true: 不封装任何内容，平铺复制到 <BinDir>/run/<AppName>/ 便于调试
+}
+
+// copyFile 复制单个文件
+func copyFile(src, dst string, mode os.FileMode) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if mode == 0 {
+		mode = 0644
+	}
+	return os.WriteFile(dst, data, mode)
+}
+
+// copyDirTree 递归复制目录
+func copyDirTree(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		sp := filepath.Join(src, e.Name())
+		dp := filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if err := copyDirTree(sp, dp); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := copyFile(sp, dp, 0644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PackUnpack 调试模式（-unpak）：不做任何封装，把运行必需的文件平铺复制到
+// <BinDir>/run/<AppName>/ 下，便于直接修改脚本反复调试。
+//
+// 依据脚本类型产出不同形态：
+//
+//	.lua 脚本：
+//	  <AppName>.exe   由 bin/GoLua.apppak 复制并改名的 Lua 解释器
+//	  <脚本>.lua      明文脚本        Asset/  明文资源        *.dll  依赖
+//	  双击 <AppName>.exe 即自动执行同目录脚本。
+//
+//	.script 录制脚本：
+//	  GoRunner.exe    由 bin/GoRunner.exe 复制（回放引擎，不焊入脚本）
+//	  <脚本>.script   明文录制脚本，可直接编辑后重放
+//	  *.dll           依赖
+//	  用法：GoRunner.exe <脚本>.script
+func PackUnpack(opts PackOptions) error {
+	scriptBytes, err := os.ReadFile(opts.ScriptPath)
+	if err != nil {
+		return fmt.Errorf("failed to read script: %w", err)
+	}
+	scriptBytes = bytes.TrimPrefix(scriptBytes, []byte("\xef\xbb\xbf"))
+	meta := ParseMeta(opts.ScriptPath, string(scriptBytes))
+	appName := strings.TrimSuffix(meta.ExeName, ".exe")
+	kind := KindFromPath(opts.ScriptPath)
+
+	binDir := opts.BinDir
+	if binDir == "" {
+		binDir = filepath.Dir(opts.RunnerPath)
+	}
+	outDir := filepath.Join(binDir, "run", appName)
+	_ = os.RemoveAll(outDir)
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("failed to create unpack dir: %w", err)
+	}
+
+	// 1. 运行时载荷
+	var runtimeSrc, runtimeDst string
+	if kind == PayloadKindScript {
+		// 录制脚本用回放引擎 GoRunner.exe
+		runtimeSrc = opts.RunnerPath
+		runtimeDst = filepath.Join(outDir, "GoRunner.exe")
+		if _, err := os.Stat(runtimeSrc); err != nil {
+			return fmt.Errorf("未找到回放引擎 bin/GoRunner.exe（请先执行 build.ps1 生成）")
+		}
+	} else {
+		// Lua 脚本用解释器载荷 GoLua.apppak，并改名为可执行程序
+		runtimeSrc = filepath.Join(binDir, "GoLua.apppak")
+		runtimeDst = filepath.Join(outDir, meta.ExeName)
+		if _, err := os.Stat(runtimeSrc); err != nil {
+			// 兼容：若尚未改名为 .apppak，则退回 GoLua.exe
+			alt := filepath.Join(binDir, "GoLua.exe")
+			if _, err2 := os.Stat(alt); err2 == nil {
+				runtimeSrc = alt
+			} else {
+				return fmt.Errorf("未找到 Lua 运行时载荷 bin/GoLua.apppak（请先执行 build.ps1 生成）")
+			}
+		}
+	}
+	if err := copyFile(runtimeSrc, runtimeDst, 0755); err != nil {
+		return fmt.Errorf("failed to copy runtime: %w", err)
+	}
+
+	// 2. 明文脚本（保持原文件名）
+	scriptName := filepath.Base(opts.ScriptPath)
+	if err := os.WriteFile(filepath.Join(outDir, scriptName), scriptBytes, 0644); err != nil {
+		return fmt.Errorf("failed to copy script: %w", err)
+	}
+
+	// 3. 明文资源目录（仅在含文件时；录制脚本无需资源）
+	if kind == PayloadKindLua {
+		scriptDir := filepath.Dir(opts.ScriptPath)
+		assetSrc := filepath.Join(scriptDir, "Asset")
+		if dirHasAnyFile(assetSrc) {
+			if err := copyDirTree(assetSrc, filepath.Join(outDir, "Asset")); err != nil {
+				return fmt.Errorf("failed to copy Asset: %w", err)
+			}
+		}
+	}
+
+	// 4. 全套依赖 DLL
+	if opts.DllDir != "" {
+		entries, err := os.ReadDir(opts.DllDir)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".dll") {
+					continue
+				}
+				_ = copyFile(filepath.Join(opts.DllDir, entry.Name()),
+					filepath.Join(outDir, entry.Name()), 0644)
+			}
+		}
+	}
+
+	fmt.Printf("[GoPacker] 调试模式(未封装)已完成: %s\n", outDir)
+	if kind == PayloadKindScript {
+		fmt.Printf("           运行方式: GoRunner.exe %s\n", scriptName)
+		fmt.Printf("           修改 %s 后直接重跑，无需重新打包\n", scriptName)
+	} else {
+		fmt.Printf("           双击 %s 即可运行（自动执行同目录 %s）\n", meta.ExeName, scriptName)
+		fmt.Printf("           修改 %s 或 Asset/ 后直接重跑，无需重新打包\n", scriptName)
+	}
+	return nil
 }
 
 // Pack packages the script according to its detected mode.
 func Pack(opts PackOptions) error {
+	if opts.UnpackMode {
+		return PackUnpack(opts)
+	}
+
 	scriptBytes, err := os.ReadFile(opts.ScriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to read script: %w", err)
@@ -136,32 +450,29 @@ func Pack(opts PackOptions) error {
 	scriptBytes = bytes.TrimPrefix(scriptBytes, []byte("\xef\xbb\xbf"))
 
 	meta := ParseMeta(opts.ScriptPath, string(scriptBytes))
-
-	// Check if there is an Asset directory next to script
+	kind := KindFromPath(opts.ScriptPath)
 	scriptDir := filepath.Dir(opts.ScriptPath)
-	assetDir := filepath.Join(scriptDir, "Asset")
-	hasAssetDir := false
-	if fi, err := os.Stat(assetDir); err == nil && fi.IsDir() {
-		hasAssetDir = true
-	}
 
-	// Prepare .pak data if Asset dir exists
+	// 仅 Lua 脚本会装配资源包：录制脚本(.script)是键鼠/手柄动作回放数据，
+	// 不含 Lua 逻辑、也不使用 Asset 资源。
 	var pakData []byte
-	if hasAssetDir {
-		pakTmp := filepath.Join(os.TempDir(), "temp_asset.pak")
-		_, err := GoPak.PackAssetDir(assetDir, pakTmp)
-		if err == nil {
-			pakData, _ = os.ReadFile(pakTmp)
-			_ = os.Remove(pakTmp)
+	if kind == PayloadKindLua {
+		assetDir := filepath.Join(scriptDir, "Asset")
+		if dirHasAnyFile(assetDir) {
+			pakTmp := filepath.Join(os.TempDir(), "temp_asset.pak")
+			if _, err := GoPak.PackAssetDir(assetDir, pakTmp); err == nil {
+				pakData, _ = os.ReadFile(pakTmp)
+				_ = os.Remove(pakTmp)
+			}
 		}
 	}
 
-	runtimeBytes, err := os.ReadFile(opts.GokeyLuaPath)
+	runtimeBytes, err := os.ReadFile(opts.RunnerPath)
 	if err != nil {
-		return fmt.Errorf("failed to read GokeyLua template: %w", err)
+		return fmt.Errorf("failed to read GoRunner template: %w", err)
 	}
 
-	runnerBytes, err := BuildRunnerPayload(runtimeBytes, meta.ExeName, meta.Version, scriptBytes)
+	runnerBytes, err := BuildRunnerPayload(runtimeBytes, meta.ExeName, meta.Version, kind, scriptBytes)
 	if err != nil {
 		return err
 	}
@@ -238,7 +549,7 @@ func Pack(opts PackOptions) error {
 		}
 	}
 
-	// Add all DLLs
+	// Add all DLLs + base 版本标记（基础模块仅由 DLL 构成，供 loader 解压到共享 base 目录）
 	if opts.DllDir != "" {
 		entries, err := os.ReadDir(opts.DllDir)
 		if err == nil {
@@ -254,6 +565,10 @@ func Pack(opts PackOptions) error {
 					}
 				}
 			}
+		}
+		// 写入基础模块版本标记，供 loader 生成 base_<版本>_<哈希> 目录名
+		if mw, err := zw.CreateHeader(&zip.FileHeader{Name: BaseMetaName, Method: zip.Deflate}); err == nil {
+			_, _ = mw.Write([]byte("version=" + ReadBaseVersion(opts.DllDir) + "\n"))
 		}
 	}
 
