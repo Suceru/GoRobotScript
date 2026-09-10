@@ -186,6 +186,12 @@ func (r *Runner) RunRecordScriptWithOptions(scriptPath string, opts PlayOptions)
 		}
 	}
 
+	// 播放结束时，若使用了虚拟手柄，安全归中并释放
+	vg, _ := GoInput.GetOrInitVirtualGamepad()
+	if vg != nil {
+		vg.SendReport(0, 0, 0, 0, 0, 0, 0)
+	}
+
 	GoInput.SoundStop()
 	fmt.Println("\n[SUCCESS] 脚本播放完毕！")
 	return nil
@@ -247,6 +253,11 @@ func replayAction(a *GoInput.RecordAction) {
 		robotgo.Scroll(a.X, a.Y)
 	case "gp":
 		// 手柄动作帧：包含完整的摇杆坐标 (lx, ly, rx, ry)、扳机 (lt, rt) 与按键掩码
+		// 通过虚拟手柄总线驱动 (ViGEmBus) 1:1 精确回放手柄物理状态
+		vg, err := GoInput.GetOrInitVirtualGamepad()
+		if err == nil && vg != nil {
+			vg.SendReport(a.GpBtns, a.GpLT, a.GpRT, a.GpLX, a.GpLY, a.GpRX, a.GpRY)
+		}
 	}
 }
 
