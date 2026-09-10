@@ -47,3 +47,12 @@ func FastMouseUp(btn string) {
 	}
 	SendMouseButton(flag)
 }
+
+// CheckHotkeyTrigger 检查指定虚拟键（如 VK_PRIOR 0x21 PgUp, VK_NEXT 0x22 PgDn）是否刚刚被按下（上升沿）
+func CheckHotkeyTrigger(vKey int, lastState *bool) bool {
+	ret, _, _ := procGetAsyncKeyState.Call(uintptr(vKey))
+	down := (uint16(ret) & 0x8000) != 0
+	triggered := down && !(*lastState)
+	*lastState = down
+	return triggered
+}

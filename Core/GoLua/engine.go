@@ -392,6 +392,73 @@ func (env *Environment) loadGoInput(L *lua.LState) int {
 		return 1
 	}))
 
+	// 全局热键状态检测 (PgUp: 0x21, PgDn: 0x22)
+	var lastPgUpState bool
+	var lastPgDnState bool
+	L.SetField(mod, "CheckPgUpTrigger", L.NewFunction(func(L *lua.LState) int {
+		triggered := GoInput.CheckHotkeyTrigger(0x21, &lastPgUpState)
+		L.Push(lua.LBool(triggered))
+		return 1
+	}))
+	L.SetField(mod, "CheckPgDnTrigger", L.NewFunction(func(L *lua.LState) int {
+		triggered := GoInput.CheckHotkeyTrigger(0x22, &lastPgDnState)
+		L.Push(lua.LBool(triggered))
+		return 1
+	}))
+
+	// 提示音
+	L.SetField(mod, "SoundStart", L.NewFunction(func(L *lua.LState) int {
+		GoInput.SoundStart()
+		return 0
+	}))
+	L.SetField(mod, "SoundPause", L.NewFunction(func(L *lua.LState) int {
+		GoInput.SoundPause()
+		return 0
+	}))
+	L.SetField(mod, "SoundResume", L.NewFunction(func(L *lua.LState) int {
+		GoInput.SoundResume()
+		return 0
+	}))
+	L.SetField(mod, "SoundStop", L.NewFunction(func(L *lua.LState) int {
+		GoInput.SoundStop()
+		return 0
+	}))
+
+	// 虚拟手柄操作接口
+	L.SetField(mod, "GamepadLeftStick", L.NewFunction(func(L *lua.LState) int {
+		lx := int16(L.CheckInt(1))
+		ly := int16(L.CheckInt(2))
+		vg, err := GoInput.GetOrInitVirtualGamepad()
+		if err != nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		ok := vg.SetLeftStick(lx, ly)
+		L.Push(lua.LBool(ok))
+		return 1
+	}))
+	L.SetField(mod, "GamepadRightStick", L.NewFunction(func(L *lua.LState) int {
+		rx := int16(L.CheckInt(1))
+		ry := int16(L.CheckInt(2))
+		vg, err := GoInput.GetOrInitVirtualGamepad()
+		if err != nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		ok := vg.SetRightStick(rx, ry)
+		L.Push(lua.LBool(ok))
+		return 1
+	}))
+	L.SetField(mod, "GamepadClose", L.NewFunction(func(L *lua.LState) int {
+		vg, _ := GoInput.GetOrInitVirtualGamepad()
+		if vg != nil {
+			vg.Close()
+		}
+		return 0
+	}))
+
 	L.Push(mod)
 	return 1
 }
