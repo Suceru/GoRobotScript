@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="GokeyRun" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="GoRobotScript" />
+    <working_directory value="$PROJECT_DIR$/bin" />
+    <kind value="FILE" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$/GokeyRun/main.go" />
+    <output_directory value="$PROJECT_DIR$/bin" />
+    <option name="run" value="false" />
+    <method v="2" />
+  </configuration>
+</component>

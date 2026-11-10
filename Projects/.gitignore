@@ -1,0 +1,4 @@
+# 保留 Projects 根目录本身，但不跟踪其内部任何子项目或内容
+# 允许用户在 Projects 下创建各自独立的 git 仓库或本地项目
+*
+!.gitignore
